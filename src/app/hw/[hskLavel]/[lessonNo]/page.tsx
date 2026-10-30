@@ -1,0 +1,732 @@
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { useLanguage } from "@/i18n";
+import {
+  EXAM_LEVELS,
+  LEVEL_TITLES,
+  buildLessonExam,
+  getExamLesson,
+  getExamLessonNumbers,
+} from "@/features/hw/data/exam";
+import {
+  clearAnswers,
+  saveAnswers,
+  saveResult,
+  summarizeResults,
+} from "@/features/hw/data/storage";
+import type {
+  ExamAnswers,
+  ExamResult,
+  ExamResultItem,
+  LessonExam,
+} from "@/features/hw/exam-types";
+import WritingSection from "@/features/hw/components/WritingSection";
+import MatchingSection from "@/features/hw/components/MatchingSection";
+import DialogueSection from "@/features/hw/components/DialogueSection";
+import McqSection from "@/features/hw/components/McqSection";
+import SpeakingSection from "@/features/hw/components/SpeakingSection";
+import DialoguePlayer from "@/features/hw/components/DialoguePlayer";
+import HandwritingAssignment from "@/features/hw/components/HandwritingAssignment";
+import LevelProgressPanel from "@/features/hw/components/LevelProgressPanel";
+import { lesson1Dialogue } from "@/features/hw/data/hsk1/lesson1-dialogue";
+import { matchesPinyinAnswer } from "@/features/hw/pinyin";
+import { round2 } from "@/features/hw/marks";
+import { loadAccountPhone } from "@/features/student-auth";
+import ProLevelGate from "@/features/vocabulary/components/ProLevelGate";
+import { LessonPdfButton } from "@/features/vocabulary/components/LessonPdfViewer";
+import { workbookPdfUrl } from "@/features/vocabulary/pdf";
+import {
+  queueHWSubmission,
+  pendingCount,
+  getPendingSubmissions,
+  syncPendingSubmissions,
+} from "@/lib/offline-hw-queue";
+
+interface MistakeItem {
+  section: string;
+  prompt: string;
+  userAnswer: string;
+  correctAnswer: string;
+  earned: number;
+  marks: number;
+}
+
+export default function HomeworkDynamicPage() {
+  const params = useParams();
+  const router = useRouter();
+  const { language } = useLanguage();
+  const t = (bn: string, en: string) => (language === "bn" ? bn : en);
+
+  const levelParam = String(params?.hskLavel ?? "hsk1").replace(/[^0-9]/g, "");
+  const level = EXAM_LEVELS.includes(Number(levelParam) as 1 | 2 | 3) ? Number(levelParam) : 1;
+  const lessonNo = Number(params?.lessonNo) || 1;
+
+  const availableLessons = useMemo(() => getExamLessonNumbers(level), [level]);
+  const exam: LessonExam | null = useMemo(
+    () => buildLessonExam(level, lessonNo),
+    [level, lessonNo],
+  );
+  // Handwritten assignment prompt: every Hanzi word of this lesson.
+  const handwritingItems = useMemo(
+    () =>
+      (getExamLesson(level, lessonNo)?.words ?? []).map((w) => ({
+        hanzi: w.h,
+        pinyin: w.p,
+        meaning: language === "bn" ? w.b || w.e : w.e || w.b,
+      })),
+    [level, lessonNo, language],
+  );
+
+  const [answers, setAnswers] = useState<ExamAnswers>({});
+  const [submitted, setSubmitted] = useState(false);
+  const [result, setResult] = useState<ExamResult | null>(null);
+  const [mistakes, setMistakes] = useState<MistakeItem[]>([]);
+  const [history, setHistory] = useState<ReturnType<typeof summarizeResults>>({});
+  const [showHistory, setShowHistory] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [pendingSync, setPendingSync] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  // Everything that carries marks. Speaking is practice (0 marks), so it is
+  // deliberately not required to submit.
+  const requiredAnswerIds = useMemo(() => {
+    if (!exam) return [];
+    return [
+      ...exam.writing.map((question) => question.id),
+      ...exam.matching.flatMap((question) =>
+        question.pairs.map((pair) => `${question.id}:${pair.hanzi}`),
+      ),
+      ...exam.dialogues.flatMap((question) => question.blanks.map((blank) => blank.id)),
+      ...exam.mcq.map((question) => question.id),
+    ];
+  }, [exam]);
+  const answeredCount = requiredAnswerIds.filter((id) => Boolean((answers[id] ?? "").trim())).length;
+  const remainingAnswerCount = requiredAnswerIds.length - answeredCount;
+  const allAnswersComplete = remainingAnswerCount === 0;
+  const answerProgress = requiredAnswerIds.length === 0 ? 100 : (answeredCount / requiredAnswerIds.length) * 100;
+
+  // Reset on every mount/lesson change. Neither the result nor the previous
+  // answers come back: every page load starts on an empty exam form, so the
+  // student always sits the exam again. Past scores stay in the history panel.
+  useEffect(() => {
+    queueMicrotask(() => {
+      setHydrated(false);
+      setAnswers({});
+      setResult(null);
+      setSubmitted(false);
+      setHistory(summarizeResults());
+      setHydrated(true);
+    });
+  }, [level, lessonNo]);
+
+  // persist draft
+  useEffect(() => {
+    if (hydrated) saveAnswers(level, lessonNo, answers);
+  }, [answers, hydrated, level, lessonNo]);
+
+  // Leaving the lesson drops the draft, so a reload always starts fresh.
+  useEffect(() => {
+    return () => clearAnswers(level, lessonNo);
+  }, [level, lessonNo]);
+
+  // Load pending sync count on mount and when coming online
+  useEffect(() => {
+    let mounted = true;
+    const loadPending = async () => {
+      const count = await pendingCount();
+      if (mounted) setPendingSync(count);
+    };
+    loadPending();
+    const onOnline = () => loadPending();
+    window.addEventListener("online", onOnline);
+    return () => {
+      mounted = false;
+      window.removeEventListener("online", onOnline);
+    };
+  }, []);
+
+  // Manual sync function
+  const handleSync = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      await syncPendingSubmissions();
+      const count = await pendingCount();
+      setPendingSync(count);
+    } catch (e) {
+      console.error("sync failed", e);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // redirect invalid lesson numbers to the first available lesson
+  useEffect(() => {
+    if (hydrated && availableLessons.length > 0 && !availableLessons.includes(lessonNo)) {
+      router.replace(`/hw/hsk${level}/${availableLessons[0]}`);
+    }
+  }, [hydrated, availableLessons, lessonNo, level, router]);
+
+  if (!exam) {
+    return (
+      <ProLevelGate level={level}>
+        <main className="max-w-4xl mx-auto p-6 my-8 text-center">
+          <h1 className="text-2xl font-bold text-text">
+            {t("এই লেসনের পরীক্ষা পাওয়া যায়নি", "Exam not found for this lesson")}
+          </h1>
+        </main>
+      </ProLevelGate>
+    );
+  }
+
+  const handleInputChange = (id: string, value: string) => {
+    setAnswers((prev) => ({ ...prev, [id]: value }));
+  };
+
+  const resultBySection = () =>
+    (result?.items ?? []).reduce<Record<string, { earned: number; marks: number; correctAnswer?: string }>>(
+      (acc, item) => {
+        acc[item.id] = { earned: item.earned, marks: item.marks, correctAnswer: item.correctAnswer };
+        return acc;
+      },
+      {},
+    );
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!allAnswersComplete) return;
+
+    const items: ExamResultItem[] = [];
+    let totalScore = 0;
+
+    // writing: exact hanzi match, trim spaces.
+    // Lesson 1 also accepts pinyin (recommended) for full marks.
+    for (const q of exam.writing) {
+      const user = (answers[q.id] ?? "").trim();
+      const ok = user === q.target || (isLesson1 && matchesPinyinAnswer(user, q.pinyin));
+      const earned = ok ? q.marks : 0;
+      totalScore += earned;
+      items.push({
+        section: "writing",
+        id: q.id,
+        prompt: `${q.prompt} (${q.pinyin})`,
+        userAnswer: user || "—",
+        correctAnswer: q.target,
+        earned,
+        marks: q.marks,
+      });
+    }
+
+    // matching: each pair carries its own share of the part's 10 marks
+    for (const q of exam.matching) {
+      let earned = 0;
+      for (const pair of q.pairs) {
+        const user = (answers[`${q.id}:${pair.hanzi}`] ?? "").trim();
+        if (user === pair.bn) earned += pair.marks;
+      }
+      totalScore += earned;
+      items.push({
+        section: "matching",
+        id: q.id,
+        prompt: t("মিলকরণ", "Matching"),
+        userAnswer: `${earned}/${q.marks}`,
+        correctAnswer: `${q.marks}/${q.marks}`,
+        earned,
+        marks: q.marks,
+      });
+    }
+
+    // dialogue: per-blank choice match
+    for (const q of exam.dialogues) {
+      for (const blank of q.blanks) {
+        const user = (answers[blank.id] ?? "").trim();
+        const ok = user === blank.answer;
+        const earned = ok ? blank.marks : 0;
+        totalScore += earned;
+        items.push({
+          section: "dialogue",
+          id: blank.id,
+          prompt: `${blank.hanzi} — ${blank.pinyin}`,
+          userAnswer: user || "—",
+          correctAnswer: blank.answer,
+          earned,
+          marks: blank.marks,
+        });
+      }
+    }
+
+    // MCQ: 1 mark per word, hanzi → Bangla meaning
+    for (const q of exam.mcq) {
+      const user = (answers[q.id] ?? "").trim();
+      const ok = user === q.bn;
+      const earned = ok ? q.marks : 0;
+      totalScore += earned;
+      items.push({
+        section: "mcq",
+        id: q.id,
+        prompt: `${q.hanzi} (${q.pinyin})`,
+        userAnswer: user || "—",
+        correctAnswer: q.bn,
+        earned,
+        marks: q.marks,
+      });
+    }
+
+    // speaking: practice only, never scored
+    for (const q of exam.speaking) {
+      const has = Boolean(answers[q.id]);
+      items.push({
+        section: "speaking",
+        id: q.id,
+        prompt: `${q.line} (${q.pinyin})`,
+        userAnswer: has ? "🎙️" : "—",
+        correctAnswer: q.line,
+        earned: 0,
+        marks: 0,
+      });
+    }
+
+    const res: ExamResult = {
+      key: `${level}-${lessonNo}`,
+      level,
+      lesson: lessonNo,
+      totalScore: round2(totalScore),
+      totalMarks: exam.totalMarks,
+      items,
+      submittedAt: new Date().toISOString(),
+    };
+
+    setResult(res);
+    setSubmitted(true);
+    saveResult(res);
+    setHistory(summarizeResults());
+    // Sync to the student's account when logged in (silent, offline-safe).
+    const accountPhone = loadAccountPhone();
+    if (accountPhone) {
+      const payload = {
+        phone: accountPhone,
+        level,
+        lesson: lessonNo,
+        totalScore: round2(totalScore),
+        totalMarks: exam.totalMarks,
+      };
+      if (navigator.onLine) {
+        fetch("/api/hw/exam-results", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).catch(() => {
+          /* offline — queue for later sync */
+          queueHWSubmission("/api/hw/exam-results", payload);
+        });
+      } else {
+        queueHWSubmission("/api/hw/exam-results", payload);
+      }
+    }
+    setMistakes(
+      items
+        .filter((i) => i.earned < i.marks)
+        .map((i) => ({
+          section: i.section,
+          prompt: i.prompt,
+          userAnswer: i.userAnswer,
+          correctAnswer: i.correctAnswer,
+          earned: i.earned,
+          marks: i.marks,
+        })),
+    );
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleRetake = () => {
+    clearAnswers(level, lessonNo);
+    setAnswers({});
+    setSubmitted(false);
+    setResult(null);
+    setMistakes([]);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const scorePercent = result ? Math.round((result.totalScore / result.totalMarks) * 100) : 0;
+  // Lesson-1 mode: pinyin-accepted writing + the bundled dialogue script.
+  // Every section collapses on every lesson. To roll the lesson-1 extras out
+  // later, change this to `true`.
+  const isLesson1 = level === 1 && lessonNo === 1;
+  const writingRes = resultBySection();
+  const matchingRes = resultBySection();
+  const dialogueRes = resultBySection();
+  const mcqRes = resultBySection();
+  const speakingRes = resultBySection();
+
+  const SECTION_LABELS: Record<string, string> = {
+    writing: t("সেকশন ১ — লেখা", "Section 1 — Writing"),
+    matching: t("সেকশন ২ — মিলকরণ", "Section 2 — Matching"),
+    dialogue: t("সেকশন ৩ — ডায়লগ", "Section 3 — Dialogue"),
+    mcq: t("সেকশন ৪ — MCQ", "Section 4 — MCQ"),
+    speaking: t("সেকশন ৫ — স্পিকিং (প্র্যাকটিস, নম্বর নেই)", "Section 5 — Speaking (practice, no marks)"),
+  };
+
+  return (
+    <ProLevelGate level={level}>
+      <main
+        className={`max-w-4xl mx-auto p-4 sm:p-6 bg-card border border-border shadow-sm rounded-3xl my-8 hsk-page ${
+          language === "bn" ? "font-bn" : "font-en"
+        }`}
+      >
+      {/* Level & Lesson selectors */}
+      <div className="bg-background p-4 rounded-2xl mb-6 border border-border flex flex-col md:flex-row justify-between items-center gap-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          {EXAM_LEVELS.map((lvl) => (
+            <button
+              key={lvl}
+              type="button"
+              onClick={() => {
+                const first = getExamLessonNumbers(lvl)[0] ?? 1;
+                router.push(`/hw/hsk${lvl}/${first}`);
+              }}
+              className={`px-4 py-1.5 rounded-full text-sm font-bold uppercase transition ${
+                level === lvl
+                  ? "bg-primary text-primary-foreground shadow"
+                  : "bg-card text-text border border-border hover:bg-primary/10"
+              }`}
+            >
+              {LEVEL_TITLES[lvl]}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label htmlFor="lessonSelect" className="text-sm font-semibold text-muted">
+            {t("লেসন", "Lesson")}:
+          </label>
+          <select
+            id="lessonSelect"
+            value={lessonNo}
+            onChange={(e) => router.push(`/hw/hsk${level}/${e.target.value}`)}
+            className="border border-border rounded-xl px-3 py-1.5 bg-card text-text text-sm font-medium focus:ring-2 focus:ring-primary outline-none"
+          >
+            {availableLessons.map((num) => (
+              <option key={num} value={num}>
+                {t("লেসন", "Lesson")} {num}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Header */}
+      <header className="border-b border-border pb-4 mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <span className="text-xs font-semibold bg-primary/10 text-primary px-3 py-1 rounded-full uppercase">
+            {LEVEL_TITLES[level]}
+          </span>
+          <h1 className="text-2xl sm:text-3xl font-bold mt-3 text-text">
+            {t(exam.titleBn, exam.titleEn)}
+          </h1>
+          <p className="text-sm text-muted mt-1">
+            {t(
+              `লেখা, মিলকরণ, ডায়লগ ও MCQ — প্রতিটি অংশে ১০ নম্বর, মোট ৪০। স্পিকিং শুধু প্র্যাকটিস।`,
+              `Writing, matching, dialogue and MCQ — 10 marks each, 40 in total. Speaking is practice only.`
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 self-start">
+          {/* The printed workbook for this lesson, opened in the same reader the
+              vocabulary pages use. A student sitting the exam can turn to the
+              exercises without hunting for the file. Null when the level or the
+              lesson has no workbook, in which case the button hides itself. */}
+          <LessonPdfButton
+            level={level}
+            lesson={lessonNo}
+            url={workbookPdfUrl(level, lessonNo)}
+            kind="workbook"
+            variant="pill"
+          />
+          {/* Offline sync indicator */}
+          {pendingSync > 0 && (
+            <button
+              type="button"
+              onClick={handleSync}
+              disabled={syncing}
+              className="flex items-center gap-1.5 rounded-xl bg-warn/10 border border-warn/30 px-3 py-1.5 text-xs font-semibold text-warn transition hover:bg-warn/20 disabled:opacity-50"
+              title={t("অফলাইন জমা দেওয়া বাকি আছে — সিঙ্ক করুন", "Pending offline submissions — tap to sync")}
+            >
+              <span className={syncing ? "animate-spin" : ""}>🔄</span>
+              <span>{t("সিঙ্ক বাকি", "Pending sync")}: {pendingSync}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowHistory((v) => !v)}
+            className="text-xs font-semibold border border-border rounded-xl px-3 py-2 text-muted hover:bg-text/5 transition"
+          >
+            📊 {t("আমার রিজাল্ট", "My Results")}
+          </button>
+        </div>
+      </header>
+
+      {/* Whole-level picture: how many marks this HSK is worth, how many the
+          student has taken, and how many exams are left. */}
+      <div className="mb-6">
+        <LevelProgressPanel level={level} highlightLesson={lessonNo} />
+      </div>
+
+      {/* History panel */}
+      {showHistory && (
+        <div className="mb-6 p-4 bg-background border border-border rounded-2xl space-y-2">
+          <h3 className="font-semibold text-text text-sm">
+            {t("সেরা স্কোর (এই ডিভাইসে সেভ করা)", "Best scores (saved on this device)")}
+          </h3>
+          {Object.keys(history).length === 0 ? (
+            <p className="text-xs text-muted">
+              {t("এখনো কোনো পরীক্ষা দেওয়া হয়নি।", "No exams taken yet.")}
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {Object.entries(history)
+                .sort(([a], [b]) => {
+                  const [la, sa] = a.split("-").map(Number);
+                  const [lb, sb] = b.split("-").map(Number);
+                  return la - lb || sa - sb;
+                })
+                .map(([key, s]) => {
+                  const [l, les] = key.split("-").map(Number);
+                  const pct = Math.round((s.best / s.totalMarks) * 100);
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => router.push(`/hw/hsk${l}/${les}`)}
+                      className="flex items-center justify-between p-2.5 rounded-xl border border-border bg-card hover:border-primary/50 transition text-sm"
+                    >
+                      <span className="text-text font-medium">
+                        {LEVEL_TITLES[l]} · {t("লেসন", "Lesson")} {les}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        <span
+                          className={`font-mono text-xs ${
+                            pct >= 80 ? "text-ok" : pct >= 40 ? "text-warn" : "text-danger"
+                          }`}
+                        >
+                          {s.best}/{s.totalMarks} ({pct}%)
+                        </span>
+                        <span className="text-[10px] text-muted">
+                          ×{s.attempts}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Result banner */}
+      {submitted && result && (
+        <div className="mb-6 p-6 bg-background border border-border rounded-2xl space-y-4">
+          <div className="text-center pb-4 border-b border-border">
+            <h3 className="text-xl sm:text-2xl font-bold text-text">
+              🎯 {t("পরীক্ষার ফলাফল", "Exam Result")}
+            </h3>
+            <p className="text-lg font-semibold text-primary mt-2">
+              {result.totalScore} / {result.totalMarks} — {scorePercent}%
+            </p>
+            <div className="max-w-xs mx-auto mt-3 h-2.5 rounded-full bg-text/10 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  scorePercent >= 80 ? "bg-ok" : scorePercent >= 40 ? "bg-warn" : "bg-danger"
+                }`}
+                style={{ width: `${scorePercent}%` }}
+              />
+            </div>
+            <p className="text-xs text-muted mt-2">
+              {scorePercent >= 80
+                ? t("🎉 অভিনন্দন! দুর্দান্ত ফলাফল!", "🎉 Excellent work!")
+                : scorePercent >= 40
+                  ? t("👍 ভালো চেষ্টা! আরেকবার চেষ্টা করলে আরও ভালো হবে।", "👍 Good try! Practice again to improve.")
+                  : t("💪 হতাশ হবেন না — আবার চেষ্টা করুন!", "💪 Keep going — try again!")}
+            </p>
+          </div>
+
+          {mistakes.length === 0 ? (
+            <p className="text-center text-ok font-medium">
+              🎉 {t("অভিনন্দন! আপনার সব উত্তর সঠিক হয়েছে!", "Perfect score — every answer correct!")}
+            </p>
+          ) : (
+            <div className="space-y-3">
+              <h4 className="font-semibold text-danger text-base">
+                ❌ {t("যে ভুলগুলো সংশোধন করতে হবে:", "Answers to review:")}
+              </h4>
+              {mistakes.map((item, index) => (
+                <div
+                  key={index}
+                  className="bg-danger-surface border border-danger/20 p-4 rounded-xl text-sm space-y-1"
+                >
+                  <p className="text-[10px] font-mono uppercase text-muted">{SECTION_LABELS[item.section]}</p>
+                  <p className="font-medium text-text font-chinese">{item.prompt}</p>
+                  <p className="text-muted">
+                    {t("আপনার উত্তর", "Your answer")}:{" "}
+                    <span className="text-danger font-semibold font-chinese">{item.userAnswer}</span>
+                  </p>
+                  <p className="text-muted">
+                    {t("সঠিক উত্তর", "Correct answer")}:{" "}
+                    <span className="text-ok font-semibold font-chinese">{item.correctAnswer}</span>
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-3 pt-2">
+            <button
+              type="button"
+              onClick={handleRetake}
+              className="flex-1 bg-primary text-primary-foreground font-semibold py-3 rounded-2xl hover:opacity-90 transition"
+            >
+              🔄 {t("আবার পরীক্ষা দিন", "Retake Exam")}
+            </button>
+            {lessonNo < availableLessons[availableLessons.length - 1] && (
+              <button
+                type="button"
+                onClick={() => router.push(`/hw/hsk${level}/${lessonNo + 1}`)}
+                className="flex-1 border border-border bg-card text-text font-semibold py-3 rounded-2xl hover:bg-text/5 transition"
+              >
+                {t("পরের লেসন →", "Next Lesson →")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Listening practice: built-in script (lesson 1) or admin-saved
+          script for this lesson — the player hides itself otherwise. */}
+      <DialoguePlayer
+        level={level}
+        lesson={lessonNo}
+        builtin={isLesson1 ? lesson1Dialogue : undefined}
+        collapsible
+      />
+
+      {/* Handwritten assignment: write this lesson's Hanzi on paper, send a
+          photo, admin marks it by hand (0–10) — outside the auto exam. */}
+      <div className="mt-6">
+        <HandwritingAssignment
+          level={level}
+          lesson={lessonNo}
+          items={handwritingItems}
+          collapsible
+        />
+      </div>
+
+      {/* Exam form */}
+      {!submitted && (
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <WritingSection
+            questions={exam.writing}
+            answers={answers}
+            onChange={handleInputChange}
+            results={undefined}
+            collapsible
+            acceptPinyin={isLesson1}
+          />
+          <MatchingSection questions={exam.matching} answers={answers} onChange={handleInputChange} collapsible twoSided />
+          <DialogueSection questions={exam.dialogues} answers={answers} onChange={handleInputChange} collapsible />
+          <McqSection questions={exam.mcq} answers={answers} onChange={handleInputChange} collapsible />
+          <SpeakingSection questions={exam.speaking} answers={answers} onChange={handleInputChange} collapsible />
+
+          <div className="sticky bottom-4 space-y-2">
+            <div className="rounded-2xl border border-border bg-card/95 p-3 shadow-sm backdrop-blur">
+              <div className="mb-2 flex items-center justify-between text-xs font-semibold text-muted">
+                <span>{t("উত্তরের অগ্রগতি", "Answer progress")}</span>
+                <span className="font-mono tabular-nums">
+                  {answeredCount}/{requiredAnswerIds.length}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-text/10">
+                <div
+                  className="h-full rounded-full bg-primary transition-all"
+                  style={{ width: `${answerProgress}%` }}
+                />
+              </div>
+            </div>
+            <button
+              type="submit"
+              disabled={!allAnswersComplete}
+              className={`w-full font-semibold py-3.5 rounded-2xl transition shadow-lg text-base ${
+                allAnswersComplete
+                  ? "bg-primary text-primary-foreground hover:opacity-90 cursor-pointer"
+                  : "bg-text/20 text-text/50 cursor-not-allowed"
+              }`}
+            >
+              {allAnswersComplete
+                ? `${t("জমা দিন ও রেজাল্ট দেখুন", "Submit & See Result")} (${exam.totalMarks} ${t("নম্বর", "marks")})`
+                : t("সব উত্তর দেওয়ার পরে জমা দিন", "Complete all answers to submit")}
+            </button>
+            {!allAnswersComplete && (
+              <p role="status" className="text-center text-xs text-muted">
+                {t(
+                  `${remainingAnswerCount} উত্তর বাকি আছে।`,
+                  `${remainingAnswerCount} answers remaining.`,
+                )}
+              </p>
+            )}
+          </div>
+        </form>
+      )}
+
+      {/* Review mode: sections rendered read-only with results after submit */}
+      {submitted && result && (
+        <div className="space-y-6 opacity-90">
+          <h3 className="text-sm font-mono uppercase tracking-wider text-muted">
+            {t("উত্তরপত্র পর্যালোচনা", "Answer sheet review")}
+          </h3>
+          <WritingSection
+            questions={exam.writing}
+            answers={answers}
+            onChange={handleInputChange}
+            disabled
+            results={writingRes}
+            collapsible
+            acceptPinyin={isLesson1}
+          />
+          <MatchingSection
+            questions={exam.matching}
+            answers={answers}
+            onChange={handleInputChange}
+            disabled
+            results={matchingRes}
+            collapsible
+            twoSided
+          />
+          <DialogueSection
+            questions={exam.dialogues}
+            answers={answers}
+            onChange={handleInputChange}
+            disabled
+            results={dialogueRes}
+            collapsible
+          />
+          <McqSection
+            questions={exam.mcq}
+            answers={answers}
+            onChange={handleInputChange}
+            disabled
+            results={mcqRes}
+            collapsible
+          />
+          <SpeakingSection
+            questions={exam.speaking}
+            answers={answers}
+            onChange={handleInputChange}
+            disabled
+            results={speakingRes}
+            collapsible
+          />
+        </div>
+      )}
+      </main>
+    </ProLevelGate>
+  );
+}

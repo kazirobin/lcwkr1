@@ -1,0 +1,60 @@
+import mongoose, { Mongoose } from "mongoose";
+
+// Read the URI lazily. Throwing at module scope would break `next build` on a
+// machine (or a CI preview) that has no database configured, even for routes
+// that never touch Mongo. Only the routes that actually query fail.
+function mongoUri(): string {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error(
+      "Please define the MONGODB_URI environment variable inside .env.local"
+    );
+  }
+  return uri;
+}
+
+interface MongooseCache {
+  conn: Mongoose | null;
+  promise: Promise<Mongoose> | null;
+}
+
+// Global scope-এ ক্যাশ টাইপ ডিক্লেয়ারেশন (Next.js hot-reload এ কানেকশন ডুপ্লিকেশন রোধে)
+declare global {
+  var mongoose: MongooseCache | undefined;
+}
+
+const cached: MongooseCache = global.mongoose || { conn: null, promise: null };
+
+if (!global.mongoose) {
+  global.mongoose = cached;
+}
+
+export async function connectDB(): Promise<Mongoose> {
+  // ১. অলরেডি কানেক্টেড থাকলে এক্সিস্টিং কানেকশন রিটার্ন
+  if (cached.conn) {
+    return cached.conn;
+  }
+
+  // ২. পেন্ডিং প্রমিজ না থাকলে নতুন প্রমিজ তৈরি
+  if (!cached.promise) {
+    const opts: mongoose.ConnectOptions = {
+      bufferCommands: false,
+    };
+
+    cached.promise = mongoose.connect(mongoUri(), opts).then((mongooseInstance) => {
+      return mongooseInstance;
+    });
+  }
+
+  // ৩. কানেকশন সেট এবং এরর হ্যান্ডলিং
+  try {
+    cached.conn = await cached.promise;
+  } catch (error) {
+    cached.promise = null;
+    throw error;
+  }
+
+  return cached.conn;
+}
+
+export default connectDB;

@@ -1,0 +1,154 @@
+import type { Metadata, Viewport } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import { Noto_Sans_Bengali, Lora, Noto_Sans_SC } from "next/font/google";
+import "./globals.css";
+import Nav from "@/components/layout/Nav";
+import Footer from "@/components/layout/Footer";
+import DonationBadge from "@/components/layout/DonationBadge";
+import LiveClassBanner from "@/features/academy/components/LiveClassBanner";
+import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
+import OfflineManager from "@/components/OfflineManager";
+import { LanguageProvider } from "@/i18n";
+import { AccountProvider } from "@/features/student-auth";
+import { AcademyProviders } from "@/components/ui/feedback";
+import AnnouncementBanner from "@/features/academy/components/AnnouncementBanner";
+import AnalyticsTracker from "@/features/analytics/AnalyticsTracker";
+import ReviewNudge from "@/features/analytics/ReviewNudge";
+import ThemeProvider from "@/providers/ThemeProvider";
+import { PinyinProvider } from "@/providers/PinyinProvider";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+// Bangla face for the whole site. Variable font — no weight list needed.
+const notoSansBengali = Noto_Sans_Bengali({
+  variable: "--font-noto-sans-bengali",
+  subsets: ["latin", "bengali"],
+  display: "swap",
+});
+
+// Reading serif for the HSK workbook surface — structural headings, lesson
+// numbers, the vocabulary glossary. One face, two weights, latin only.
+const lora = Lora({
+  variable: "--font-lora",
+  subsets: ["latin"],
+  weight: ["500"],
+  display: "swap",
+});
+
+// The one Chinese face for the whole site: Noto Sans SC (Hei). It is also a
+// fallback in .font-bn / .font-en, so hanzi renders in this font even where
+// the .font-chinese class is missing.
+const notoSansSC = Noto_Sans_SC({
+  variable: "--font-noto-sans-sc",
+  subsets: ["latin"],
+  weight: ["400"],
+  display: "swap",
+});
+
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://lcwkr.vercel.app";
+
+const SITE_DESCRIPTION =
+  "A free, structured path from your first Pinyin sound to HSK 6 — live classes six days a week and a practice community that answers back, every lesson taught in Bangla.";
+
+export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: "Learn Chinese with Kazi Robin",
+    template: "%s · Learn Chinese with Kazi Robin",
+  },
+  description: SITE_DESCRIPTION,
+  applicationName: "Learn Chinese with Kazi Robin",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/pwa-192x192.png", sizes: "192x192", type: "image/png" },
+      { url: "/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: "/apple-touch-icon.png",
+  },
+  appleWebApp: {
+    capable: true,
+    title: "Learn Chinese with Kazi Robin",
+    statusBarStyle: "default",
+  },
+  openGraph: {
+    type: "website",
+    siteName: "Learn Chinese with Kazi Robin",
+    locale: "bn_BD",
+    alternateLocale: ["en_US"],
+    url: SITE_URL,
+    title: "Learn Chinese with Kazi Robin",
+    description: SITE_DESCRIPTION,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Learn Chinese with Kazi Robin",
+    description: SITE_DESCRIPTION,
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#071614",
+  colorScheme: "light dark",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html
+      lang="bn"
+      className={`${geistSans.variable} ${geistMono.variable} ${notoSansBengali.variable} ${lora.variable} ${notoSansSC.variable} font-bn h-full antialiased`}
+      suppressHydrationWarning
+    >
+      <body className="flex min-h-full flex-col" suppressHydrationWarning>
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-text focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-background"
+        >
+          Skip to content
+        </a>
+        <ThemeProvider>
+          <PinyinProvider>
+          <LanguageProvider>
+            {/* Toast + confirm live at the root so any page can use them —
+                previously they only existed under /academy and /admin. */}
+            <AcademyProviders>
+            <AccountProvider>
+              <Nav />
+              {/* Site-wide notices, e.g. "a new course has launched". */}
+              <AnnouncementBanner />
+              <main id="main-content" className="flex-1 pt-16 sm:pt-20">
+                {children}
+              </main>
+              <Footer />
+              <DonationBadge />
+              <LiveClassBanner />
+              <ServiceWorkerRegistrar />
+              <OfflineManager />
+              <AnalyticsTracker />
+              <ReviewNudge />
+            </AccountProvider>
+            </AcademyProviders>
+          </LanguageProvider>
+          </PinyinProvider>
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}

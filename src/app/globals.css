@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+.font-en {
+  font-family: var(--font-geist-sans), var(--font-noto-sans-sc), sans-serif;
+}
+
+.font-bn {
+  font-family: var(--font-noto-sans-bengali), var(--font-noto-sans-sc), sans-serif;
+}
+
+/* Chinese font class - the same Noto Sans SC face, kept for explicit use.
+   Hanzi is always regular weight: legibility comes from size, never from a
+   heavier face, so `font-bold`/`font-medium` on a hanzi element is neutralised
+   here (an unlayered rule beats Tailwind's layered utilities). */
+.font-chinese,
+[lang="zh"] {
+  font-family: var(--font-noto-sans-sc), sans-serif;
+  font-weight: 400;
+}
+
+/* Pinyin visibility: the Nav "拼" toggle adds .hide-pinyin on <html>; every
+   pinyin element carries data-pinyin and disappears site-wide. */
+.hide-pinyin [data-pinyin] {
+  display: none !important;
+}
+
+/* Bangla carries taller vowel signs and low-hanging
+   conjuncts than Latin — tight Tailwind line-heights clip them. On the
+   /hsk workbook, give Bangla headings and compact UI text enough
+   vertical room. Unlayered so it beats the utility line-heights; scoped
+   to .hsk-page.font-bn so it touches nothing else. */
+.hsk-page.font-bn :is(h1, h2, h3) {
+  line-height: 1.3;
+}
+.hsk-page.font-bn :is(.text-xs, .text-sm) {
+  line-height: 1.6;
+}
+
+@layer base {
+  :root {
+    /* #071614 - Dark Teal */
+    --text: 165 70% 5%;
+    /* #f7fcfc - Light Teal White */
+    --background: 180 50% 98%;
+    /* #fa7d4e - Orange (HSL: 18, 95%, 64%) */
+    --primary: 18 95% 64%;
+    /* #ff3726 - Red (HSL: 5, 100%, 57%) */
+    --secondary: 5 100% 57%;
+    /* Using orange as accent */
+    --accent: 18 95% 64%;
+
+    /* Surfaces & de-emphasised text (previously referenced but undefined) */
+    --card: 0 0% 100%;
+    --border: 165 24% 90%;
+    --muted: 165 12% 38%;
+    --primary-foreground: 165 70% 6%;
+
+    /* Rice-paper ground for the sumi-e register (matches the #f8f3ea used
+       inline on the home hero / intro). Academy sections use bg-paper. */
+    --paper: 40 44% 95%;
+
+    --ok: 158 46% 29%;
+    --ok-surface: 158 40% 92%;
+    --warn: 28 54% 32%;
+    --warn-surface: 34 62% 90%;
+    --danger: 5 74% 44%;
+    --danger-surface: 5 70% 94%;
+  }
+
+  .dark {
+    --text: 170 40% 94%;
+    --background: 180 40% 2%;
+    --primary: 18 95% 64%;
+    --secondary: 5 100% 57%;
+    --accent: 18 95% 64%;
+
+    --card: 180 34% 5%;
+    --border: 170 18% 16%;
+    --muted: 170 14% 65%;
+    --primary-foreground: 165 70% 6%;
+
+    --paper: 180 40% 2%;
+
+    --ok: 152 44% 62%;
+    --ok-surface: 158 34% 12%;
+    --warn: 36 66% 63%;
+    --warn-surface: 30 42% 12%;
+    --danger: 5 84% 68%;
+    --danger-surface: 5 44% 14%;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--text));
+  }
+}
+
+@theme inline {
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", SFMono-Regular,
+    Menlo, monospace;
+
+  --font-serif: var(--font-lora), Georgia, "Times New Roman", serif;
+
+  /* Adding Chinese font variable to Tailwind theme */
+  --font-chinese: var(--font-noto-sans-sc), sans-serif;
+
+  --color-text: hsl(var(--text));
+  --color-background: hsl(var(--background));
+  --color-primary: hsl(var(--primary));
+  --color-secondary: hsl(var(--secondary));
+  --color-accent: hsl(var(--accent));
+  --color-card: hsl(var(--card));
+  --color-border: hsl(var(--border));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-paper: hsl(var(--paper));
+  --color-ok: hsl(var(--ok));
+  --color-ok-surface: hsl(var(--ok-surface));
+  --color-warn: hsl(var(--warn));
+  --color-warn-surface: hsl(var(--warn-surface));
+  --color-danger: hsl(var(--danger));
+  --color-danger-surface: hsl(var(--danger-surface));
+
+  --color-text-rgb: var(--text);
+  --color-background-rgb: var(--background);
+  --color-primary-rgb: var(--primary);
+  --color-secondary-rgb: var(--secondary);
+  --color-accent-rgb: var(--accent);
+}
+
+/* (বাকি অ্যানিমেশন ও কোড অপরিবর্তিত থাকবে...) */
+
+/* ── the lesson reader ──
+   A turned page settles into place instead of arriving in one jump. The
+   duration comes from the reader as --pdf-turn so the animation and the zoom
+   preview it shares a transform with stay the same length. */
+.pdf-page-enter {
+  animation: pdf-page-in var(--pdf-turn, 190ms) ease-out;
+}
+
+@keyframes pdf-page-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Someone who has asked their device for less movement gets the page straight
+   away, and nothing in the reader is worth fighting that preference over. */
+@media (prefers-reduced-motion: reduce) {
+  .pdf-page-enter {
+    animation: none;
+  }
+}
